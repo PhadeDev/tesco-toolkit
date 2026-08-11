@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesco Toolkit (All-in-One)
 // @namespace    phaderon.tesco.toolkit
-// @version      1.0
+// @version      1.1
 // @description  Combined Tesco helper: copy basket list to clipboard on the trolley page, bulk-save every item to a list on My Favourites / Last Order.
 // @match        https://www.tesco.com/shop/en-GB/trolley*
 // @match        https://www.tesco.com/groceries/en-GB/trolley*
@@ -90,8 +90,15 @@
     }
 
     function initBasketCopy() {
-        if (!document.querySelector('li[data-testid="product-list-item"]')) return;
-        if (document.getElementById('basket-copy-btn')) return;
+        const existing = document.getElementById('basket-copy-btn');
+        const onTrolleyPage = /\/(shop|groceries)\/en-GB\/trolley/.test(location.pathname);
+        const hasBasketItems = !!document.querySelector('li[data-testid="product-list-item"]');
+
+        if (!onTrolleyPage || !hasBasketItems) {
+            if (existing) existing.remove();
+            return;
+        }
+        if (existing) return;
 
         const btn = makeFloatingButton('basket-copy-btn', 'Copy Basket List', 20);
         btn.addEventListener('click', () => copyBasket(btn));
@@ -151,9 +158,15 @@
     }
 
     function initBulkSave() {
-        if (!document.querySelector('.save-to-list-container button[aria-label^="Save to list "]')
-            && !document.querySelector('.save-to-list-container')) return;
-        if (document.getElementById('bulk-save-to-list-btn')) return;
+        const existing = document.getElementById('bulk-save-to-list-btn');
+        const onFavouritesPage = /\/(shop|groceries)\/en-GB\/favourites/.test(location.pathname);
+        const hasSaveContainer = !!document.querySelector('.save-to-list-container');
+
+        if (!onFavouritesPage || !hasSaveContainer) {
+            if (existing) existing.remove();
+            return;
+        }
+        if (existing) return;
 
         const btn = makeFloatingButton('bulk-save-to-list-btn', 'Save All To List', 70);
 
