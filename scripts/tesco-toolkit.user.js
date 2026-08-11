@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesco Toolkit (All-in-One)
 // @namespace    phaderon.tesco.toolkit
-// @version      2.1
+// @version      2.2
 // @description  Combined Tesco helper: copy basket list to clipboard on the trolley page, bulk-save every item to a list on My Favourites / Last Order, and add every product on ANY page (order receipts, product pages, anywhere) to a shopping list via Tesco's own API.
 // @match        https://www.tesco.com/shop/en-GB/*
 // @match        https://www.tesco.com/groceries/en-GB/*
@@ -194,15 +194,20 @@
     }
 
     function extractPageProducts() {
+        // Tesco's SPA appends a fresh discover+json blob on every in-app
+        // navigation but never removes the previous one(s). Reading only the
+        // most recently added tag avoids merging stale products left over
+        // from an order/page the user isn't looking at anymore.
+        const scripts = document.querySelectorAll('script[type="application/discover+json"]');
+        if (scripts.length === 0) return [];
+        const latest = scripts[scripts.length - 1];
+
         const out = [];
         const seen = new Set();
-        const scripts = document.querySelectorAll('script[type="application/discover+json"]');
-        scripts.forEach((script) => {
-            try {
-                const data = JSON.parse(script.textContent);
-                deepFindProducts(data, out, seen);
-            } catch (e) { /* ignore malformed blobs */ }
-        });
+        try {
+            const data = JSON.parse(latest.textContent);
+            deepFindProducts(data, out, seen);
+        } catch (e) { /* ignore malformed blob */ }
         return out;
     }
 
@@ -397,7 +402,15 @@
             if (existing) existing.remove();
             return;
         }
-        if (existing) return;
+
+        if (existing) {
+            // Keep the label honest as the user navigates between pages
+            // in-app (SPA route changes don't reload the script).
+            if (existing.dataset.running !== '1') {
+                existing.textContent = `Add ${products.length} Item(s) To List (API)`;
+            }
+            return;
+        }
 
         const btn = makeFloatingButton('api-add-to-list-btn', `Add ${products.length} Item(s) To List (API)`, 120);
 
