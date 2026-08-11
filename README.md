@@ -4,6 +4,15 @@ A growing collection of Violentmonkey/Tampermonkey userscripts for Tesco's groce
 
 ## Scripts
 
+### Tesco Toolkit — All-in-One (`scripts/tesco-toolkit.user.js`)
+
+**Recommended install.** Combines both scripts below into a single userscript
+so you only need one Violentmonkey install: Copy Basket List on the trolley
+page, and Save All To List on My Favourites / Last Order. Each feature only
+activates on the page it's relevant to. If you previously installed the two
+scripts separately, remove them from Violentmonkey after installing this one
+to avoid duplicate buttons.
+
 ### Tesco Basket Copy List (`scripts/tesco-basket-copy-list.user.js`)
 
 Adds a "Copy Basket List" button to the Tesco trolley page. Copies a clean
