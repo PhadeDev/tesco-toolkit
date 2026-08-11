@@ -20,16 +20,28 @@ The API-based feature works by reading `tpnb` (Tesco's internal product
 number) out of a hidden `<script type="application/discover+json">` data
 blob that every Tesco page embeds, then calling Tesco's own GraphQL API
 (`xapi.tesco.com`, `UpdateShoppingListItem`) directly — no clicking, no
-modals, and it can batch dozens of items into a single request. To
-authenticate, the script quietly watches the page's own network requests
-(it doesn't make its own until it's seen one) and copies the same
-`authorization` header Tesco's own JS sends, since that token lives in
-memory only and can't be read from storage. Nothing is hardcoded except a
-static, non-secret `x-apikey` value shared by every visitor to the site — no
-personal token is ever stored in the script.
+modals, and it can batch dozens of items into a single request.
 
-Because it now needs to see the page's earliest network requests, this
-script runs on nearly all of `tesco.com/shop/en-GB/*` and
+**Auth token (manual, once an hour or so):** this call needs a short-lived
+Tesco access token. It can't be read from browser storage (Tesco keeps it
+in memory only) and can't be reliably sniffed from page traffic either
+(Tesco's GraphQL client binds its own private reference to `fetch` before
+any userscript gets a chance to patch it). So instead, the first time you
+use the button — and again whenever the token expires, roughly hourly —
+it'll prompt you to paste one:
+
+1. Open DevTools (F12) → Network tab
+2. Do anything list-related on the site (e.g. click a real "Save to list" link)
+3. Find the request to `xapi.tesco.com` in the list
+4. Headers tab → copy the full `authorization` request header value (starts with `Bearer eyJ...`)
+5. Paste it into the prompt
+
+It's stored locally via Violentmonkey's own storage (`GM_setValue`) and
+reused until it expires. Nothing is hardcoded in the script except a
+static, non-secret `x-apikey` value shared by every visitor to the site —
+your personal token never leaves your machine or gets committed anywhere.
+
+This script runs on nearly all of `tesco.com/shop/en-GB/*` and
 `tesco.com/groceries/en-GB/*`, not just the specific pages above — each
 button still only appears where its feature actually applies. If you
 previously installed the two standalone scripts below, remove them from

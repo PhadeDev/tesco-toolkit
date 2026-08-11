@@ -1,12 +1,14 @@
 // ==UserScript==
 // @name         Tesco Toolkit (All-in-One)
 // @namespace    phaderon.tesco.toolkit
-// @version      2.2
+// @version      3.0
 // @description  Combined Tesco helper: copy basket list to clipboard on the trolley page, bulk-save every item to a list on My Favourites / Last Order, and add every product on ANY page (order receipts, product pages, anywhere) to a shopping list via Tesco's own API.
 // @match        https://www.tesco.com/shop/en-GB/*
 // @match        https://www.tesco.com/groceries/en-GB/*
 // @run-at       document-start
 // @grant        GM_setClipboard
+// @grant        GM_setValue
+// @grant        GM_getValue
 // ==/UserScript==
 
 (function () {
@@ -46,78 +48,60 @@
         return btn;
     }
 
-    // ---------- Auth capture (needed for the API-based add-to-list feature) ----------
-    // Tesco keeps its access token in memory only (not in any storage we can read),
-    // refreshed via a flow we can't replicate. Instead we quietly watch the page's
-    // own outgoing requests to xapi.tesco.com and copy the headers it sends itself.
+    // ---------- Auth (needed for the API-based add-to-list feature) ----------
+    // Tesco's GraphQL client grabs its own private reference to the native
+    // fetch when its bundle first loads, before any userscript can patch
+    // window.fetch — so passively sniffing outgoing requests never works
+    // reliably here. Instead the user pastes a token captured once from
+    // DevTools (Network tab -> a request to xapi.tesco.com -> the
+    // "authorization" request header), we store it, and reuse it until it
+    // expires (about an hour), at which point we just ask for a fresh one.
 
-    const auth = {
-        bearer: null,
-        customerUuid: null,
-        apiKey: 'TvOSZJHlEk0pjniDGQFAc9Q59WGAR4dA', // static app key, same for every user
-    };
+    const STATIC_API_KEY = 'TvOSZJHlEk0pjniDGQFAc9Q59WGAR4dA'; // shared app key, same for every visitor, not a secret
 
-    function captureHeadersFrom(headerGetter) {
+    function decodeJwtExpiryMs(bearerValue) {
         try {
-            const url = headerGetter.url;
-            if (!url || url.indexOf('xapi.tesco.com') === -1) return;
-            const bearer = headerGetter.get('authorization');
-            const cust = headerGetter.get('customer-uuid');
-            const key = headerGetter.get('x-apikey');
-            if (bearer) auth.bearer = bearer;
-            if (cust) auth.customerUuid = cust;
-            if (key) auth.apiKey = key;
-        } catch (e) { /* ignore */ }
+            const raw = bearerValue.replace(/^Bearer\s+/i, '').trim();
+            const payload = raw.split('.')[1];
+            const base64 = payload.replace(/-/g, '+').replace(/_/g, '/');
+            const json = JSON.parse(atob(base64));
+            return typeof json.exp === 'number' ? json.exp * 1000 : null;
+        } catch (e) {
+            return null;
+        }
     }
 
-    (function installInterceptors() {
-        const originalFetch = window.fetch;
-        if (originalFetch && !originalFetch.__tescoToolkitPatched) {
-            const patchedFetch = function (input, init) {
-                try {
-                    const url = typeof input === 'string' ? input : (input && input.url) || '';
-                    const headersSource = (init && init.headers) || (input && input.headers);
-                    if (url.indexOf('xapi.tesco.com') !== -1 && headersSource) {
-                        const h = headersSource instanceof Headers ? headersSource : new Headers(headersSource);
-                        captureHeadersFrom({ url: url, get: (name) => h.get(name) });
-                    }
-                } catch (e) { /* ignore */ }
-                return originalFetch.apply(this, arguments);
-            };
-            patchedFetch.__tescoToolkitPatched = true;
-            window.fetch = patchedFetch;
+    function getStoredToken() {
+        const bearer = GM_getValue('tescoBearer', null);
+        const expiresAt = GM_getValue('tescoBearerExpiresAt', 0);
+        if (!bearer) return null;
+        if (Date.now() >= expiresAt) return null;
+        return bearer;
+    }
+
+    function promptForToken() {
+        const pasted = window.prompt(
+            'Paste your Tesco auth token.\n\n' +
+            'How to get it: open DevTools (F12) -> Network tab -> do anything ' +
+            'list-related (e.g. click a real "Save to list" link) -> find the ' +
+            'request to xapi.tesco.com -> Headers tab -> copy the full ' +
+            '"authorization" request header value (starts with "Bearer eyJ...").\n\n' +
+            'Paste it here, including the word "Bearer":'
+        );
+        if (!pasted) return null;
+        const trimmed = pasted.trim();
+        const bearerValue = /^Bearer\s+/i.test(trimmed) ? trimmed : `Bearer ${trimmed}`;
+        const expMs = decodeJwtExpiryMs(bearerValue);
+        if (!expMs) {
+            window.alert('That doesn\'t look like a valid token (could not read an expiry from it). Nothing was saved.');
+            return null;
         }
-
-        const OriginalXHR = window.XMLHttpRequest;
-        if (OriginalXHR && !OriginalXHR.prototype.__tescoToolkitPatched) {
-            const originalOpen = OriginalXHR.prototype.open;
-            const originalSetHeader = OriginalXHR.prototype.setRequestHeader;
-
-            OriginalXHR.prototype.open = function (method, url) {
-                this.__tescoToolkitUrl = url;
-                this.__tescoToolkitHeaders = {};
-                return originalOpen.apply(this, arguments);
-            };
-
-            OriginalXHR.prototype.setRequestHeader = function (name, value) {
-                if (this.__tescoToolkitHeaders) {
-                    this.__tescoToolkitHeaders[name.toLowerCase()] = value;
-                    if (this.__tescoToolkitUrl && this.__tescoToolkitUrl.indexOf('xapi.tesco.com') !== -1) {
-                        captureHeadersFrom({
-                            url: this.__tescoToolkitUrl,
-                            get: (n) => this.__tescoToolkitHeaders[n.toLowerCase()],
-                        });
-                    }
-                }
-                return originalSetHeader.apply(this, arguments);
-            };
-
-            OriginalXHR.prototype.__tescoToolkitPatched = true;
-        }
-    })();
+        GM_setValue('tescoBearer', bearerValue);
+        GM_setValue('tescoBearerExpiresAt', expMs);
+        return bearerValue;
+    }
 
     function getCustomerUuid() {
-        if (auth.customerUuid) return auth.customerUuid;
         try {
             const stored = localStorage.getItem('_ait');
             if (stored) return stored;
@@ -126,9 +110,14 @@
     }
 
     async function tescoApiCall(operations) {
-        if (!auth.bearer) {
-            throw new Error('NO_AUTH_YET');
+        let bearer = getStoredToken();
+        if (!bearer) {
+            bearer = promptForToken();
         }
+        if (!bearer) {
+            throw new Error('NO_AUTH');
+        }
+
         const customerUuid = getCustomerUuid();
         const res = await fetch('https://xapi.tesco.com/', {
             method: 'POST',
@@ -137,12 +126,21 @@
                 'accept': 'application/json',
                 'region': 'UK',
                 'language': 'en-GB',
-                'x-apikey': auth.apiKey,
-                'authorization': auth.bearer,
+                'x-apikey': STATIC_API_KEY,
+                'authorization': bearer,
                 'customer-uuid': customerUuid || '',
             },
             body: JSON.stringify(operations),
         });
+
+        if (res.status === 401 || res.status === 403) {
+            // Stored token was rejected (expired/invalid) — clear it and ask once more.
+            GM_setValue('tescoBearer', null);
+            const fresh = promptForToken();
+            if (!fresh) throw new Error('NO_AUTH');
+            return tescoApiCall(operations);
+        }
+
         const json = await res.json();
         return json;
     }
@@ -419,15 +417,6 @@
             btn.dataset.running = '1';
             const originalText = btn.textContent;
 
-            if (!auth.bearer) {
-                btn.textContent = 'Waiting for Tesco API call... browse a bit';
-                setTimeout(() => {
-                    btn.textContent = originalText;
-                    btn.dataset.running = '0';
-                }, 3000);
-                return;
-            }
-
             const currentProducts = extractPageProducts();
             btn.textContent = 'Choose a list...';
 
@@ -438,7 +427,10 @@
                 return;
             }
             if (choice.error) {
-                btn.textContent = 'Failed to load lists';
+                const message = choice.error && choice.error.message === 'NO_AUTH'
+                    ? 'No token entered'
+                    : 'Failed to load lists';
+                btn.textContent = message;
                 setTimeout(() => {
                     btn.textContent = originalText;
                     btn.dataset.running = '0';
