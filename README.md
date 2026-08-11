@@ -24,17 +24,26 @@ modals, and it can batch dozens of items into a single request.
 
 **Auth token (manual, once an hour or so):** this call needs a short-lived
 Tesco access token. It can't be read from browser storage (Tesco keeps it
-in memory only) and can't be reliably sniffed from page traffic either
-(Tesco's GraphQL client binds its own private reference to `fetch` before
-any userscript gets a chance to patch it). So instead, the first time you
-use the button — and again whenever the token expires, roughly hourly —
-it'll prompt you to paste one:
+in memory only), and it can't be sniffed from page traffic either — Tesco's
+site appears to actively defend against exactly this kind of interception
+(Akamai bot-protection, Queue-it headers present on every API response).
+So instead, the first time you use the button — and again whenever the
+token expires, roughly hourly — it'll prompt you to paste one:
 
 1. Open DevTools (F12) → Network tab
 2. Do anything list-related on the site (e.g. click a real "Save to list" link)
-3. Find the request to `xapi.tesco.com` in the list
-4. Headers tab → copy the full `authorization` request header value (starts with `Bearer eyJ...`)
-5. Paste it into the prompt
+3. Click the request to `xapi.tesco.com` in the list
+4. Paste **anything** containing that request into the prompt — the raw
+   `authorization` header line, a full "Copy as cURL/fetch," the whole
+   Headers panel, or an entire pasted HAR export all work. The script finds
+   the `Bearer ...` token itself via pattern match, so there's no need to
+   isolate the exact line by hand.
+
+Note this only matters for pages with no native "Save to list" control at
+all (order receipts, the basket). My Favourites / Last Order / Previously
+Bought have a real clickable "Save to list" link Tesco built themselves —
+use the "Save All To List" click-automation button there instead, which
+needs no token at all.
 
 It's stored locally via Violentmonkey's own storage (`GM_setValue`) and
 reused until it expires. Nothing is hardcoded in the script except a

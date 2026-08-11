@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesco Toolkit (All-in-One)
 // @namespace    phaderon.tesco.toolkit
-// @version      3.0
+// @version      3.1
 // @description  Combined Tesco helper: copy basket list to clipboard on the trolley page, bulk-save every item to a list on My Favourites / Last Order, and add every product on ANY page (order receipts, product pages, anywhere) to a shopping list via Tesco's own API.
 // @match        https://www.tesco.com/shop/en-GB/*
 // @match        https://www.tesco.com/groceries/en-GB/*
@@ -79,21 +79,35 @@
         return bearer;
     }
 
+    function extractBearerFromBlob(text) {
+        // Accepts literally anything that contains the token somewhere in it:
+        // a raw header value, a full "Headers" panel copy, a copied cURL/fetch
+        // command, or a whole pasted HAR export. No need to isolate the exact
+        // line by hand.
+        const match = text.match(/Bearer\s+[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+/);
+        return match ? match[0] : null;
+    }
+
     function promptForToken() {
         const pasted = window.prompt(
-            'Paste your Tesco auth token.\n\n' +
-            'How to get it: open DevTools (F12) -> Network tab -> do anything ' +
-            'list-related (e.g. click a real "Save to list" link) -> find the ' +
-            'request to xapi.tesco.com -> Headers tab -> copy the full ' +
-            '"authorization" request header value (starts with "Bearer eyJ...").\n\n' +
-            'Paste it here, including the word "Bearer":'
+            'Need a fresh Tesco auth token.\n\n' +
+            'Open DevTools (F12) -> Network tab -> do anything list-related ' +
+            '(e.g. click a real "Save to list" link) -> click the request to ' +
+            'xapi.tesco.com. Then paste ANYTHING containing it below — the ' +
+            'raw "authorization" header line, a full "Copy as cURL/fetch", the ' +
+            'whole Headers panel, or an entire pasted HAR export all work, ' +
+            'the token will be found automatically:'
         );
         if (!pasted) return null;
-        const trimmed = pasted.trim();
-        const bearerValue = /^Bearer\s+/i.test(trimmed) ? trimmed : `Bearer ${trimmed}`;
+
+        const bearerValue = extractBearerFromBlob(pasted);
+        if (!bearerValue) {
+            window.alert('Could not find a "Bearer ..." token anywhere in what was pasted. Nothing was saved.');
+            return null;
+        }
         const expMs = decodeJwtExpiryMs(bearerValue);
         if (!expMs) {
-            window.alert('That doesn\'t look like a valid token (could not read an expiry from it). Nothing was saved.');
+            window.alert('Found something starting with "Bearer" but couldn\'t read an expiry from it. Nothing was saved.');
             return null;
         }
         GM_setValue('tescoBearer', bearerValue);
