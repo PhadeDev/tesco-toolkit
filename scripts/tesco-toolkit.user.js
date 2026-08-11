@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesco Toolkit (All-in-One)
 // @namespace    phaderon.tesco.toolkit
-// @version      2.0
+// @version      2.1
 // @description  Combined Tesco helper: copy basket list to clipboard on the trolley page, bulk-save every item to a list on My Favourites / Last Order, and add every product on ANY page (order receipts, product pages, anywhere) to a shopping list via Tesco's own API.
 // @match        https://www.tesco.com/shop/en-GB/*
 // @match        https://www.tesco.com/groceries/en-GB/*
@@ -387,9 +387,13 @@
 
     function initApiAddToList() {
         const existing = document.getElementById('api-add-to-list-btn');
+        const onProductPage = /\/(shop|groceries)\/en-GB\/products\//.test(location.pathname);
         const products = extractPageProducts();
 
-        if (products.length === 0) {
+        // Individual product pages already have their own native "Save to list"
+        // link (Tesco appears to be rolling this out inconsistently across
+        // products), so this button would just be redundant clutter there.
+        if (onProductPage || products.length === 0) {
             if (existing) existing.remove();
             return;
         }
