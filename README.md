@@ -6,12 +6,34 @@ A growing collection of Violentmonkey/Tampermonkey userscripts for Tesco's groce
 
 ### Tesco Toolkit — All-in-One (`scripts/tesco-toolkit.user.js`)
 
-**Recommended install.** Combines both scripts below into a single userscript
-so you only need one Violentmonkey install: Copy Basket List on the trolley
-page, and Save All To List on My Favourites / Last Order. Each feature only
-activates on the page it's relevant to. If you previously installed the two
-scripts separately, remove them from Violentmonkey after installing this one
-to avoid duplicate buttons.
+**Recommended install.** One userscript, three features, each only active on
+the page it's relevant to:
+
+- **Copy Basket List** — trolley page, copies the basket contents to clipboard
+- **Save All To List (click automation)** — My Favourites / Last Order,
+  clicks every "Save to list" link in sequence and dismisses the popup
+- **Add Item(s) To List (API)** — works on *any* page, including order
+  receipts and individual product pages, where Tesco provides no
+  "save to list" control at all
+
+The API-based feature works by reading `tpnb` (Tesco's internal product
+number) out of a hidden `<script type="application/discover+json">` data
+blob that every Tesco page embeds, then calling Tesco's own GraphQL API
+(`xapi.tesco.com`, `UpdateShoppingListItem`) directly — no clicking, no
+modals, and it can batch dozens of items into a single request. To
+authenticate, the script quietly watches the page's own network requests
+(it doesn't make its own until it's seen one) and copies the same
+`authorization` header Tesco's own JS sends, since that token lives in
+memory only and can't be read from storage. Nothing is hardcoded except a
+static, non-secret `x-apikey` value shared by every visitor to the site — no
+personal token is ever stored in the script.
+
+Because it now needs to see the page's earliest network requests, this
+script runs on nearly all of `tesco.com/shop/en-GB/*` and
+`tesco.com/groceries/en-GB/*`, not just the specific pages above — each
+button still only appears where its feature actually applies. If you
+previously installed the two standalone scripts below, remove them from
+Violentmonkey after installing this one to avoid duplicate buttons.
 
 ### Tesco Basket Copy List (`scripts/tesco-basket-copy-list.user.js`)
 
