@@ -31,22 +31,19 @@ blob that every Tesco page embeds, then calling Tesco's own GraphQL API
 (`xapi.tesco.com`, `UpdateShoppingListItem`) directly — no clicking, no
 modals, and it can batch dozens of items into a single request.
 
-**Auth token (manual, once an hour or so):** this call needs a short-lived
-Tesco access token. It can't be read from browser storage (Tesco keeps it
-in memory only), and it can't be sniffed from page traffic either — Tesco's
-site appears to actively defend against exactly this kind of interception
-(Akamai bot-protection, Queue-it headers present on every API response).
-So instead, the first time you use the button — and again whenever the
-token expires, roughly hourly — it'll prompt you to paste one:
+**Auth token:** Tesco keeps the short-lived access token in its app runtime,
+not ordinary browser storage. The toolkit now watches Tesco's own
+`xapi.tesco.com` requests in the background and captures the bearer token
+automatically when Tesco uses it. A small traffic-light status pill appears
+near the toolkit buttons:
 
-1. Open DevTools (F12) → Network tab
-2. Do anything list-related on the site (e.g. click a real "Save to list" link)
-3. Click the request to `xapi.tesco.com` in the list
-4. Paste **anything** containing that request into the prompt — the raw
-   `authorization` header line, a full "Copy as cURL/fetch," the whole
-   Headers panel, or an entire pasted HAR export all work. The script finds
-   the `Bearer ...` token itself via pattern match, so there's no need to
-   isolate the exact line by hand.
+- Green: auth captured and ready for toolkit API calls
+- Amber: auth was captured but has expired
+- Red: waiting for Tesco to make an authenticated API request
+
+If the light is red or amber, browse Tesco normally or perform a normal Tesco
+list/basket action, then try the toolkit button again. The page is never
+blocked by an auth prompt.
 
 Note this only matters for pages with no native "Save to list" control at
 all (order receipts, and the trolley-only **Save Basket To List** bridge).
@@ -54,8 +51,9 @@ My Favourites / Last Order / Previously Bought have a real clickable
 "Save to list" link Tesco built themselves — use the "Save All To List"
 click-automation button there instead, which needs no token at all.
 
-It's stored locally via Violentmonkey's own storage (`GM_setValue`) and
-reused until it expires. Nothing is hardcoded in the script except a
+The captured token is stored locally via Violentmonkey's own storage
+(`GM_setValue`) and reused until it expires. Nothing is hardcoded in the
+script except a
 static, non-secret `x-apikey` value shared by every visitor to the site —
 your personal token never leaves your machine or gets committed anywhere.
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesco Toolkit (All-in-One)
 // @namespace    phaderon.tesco.toolkit
-// @version      3.2
+// @version      3.3
 // @description  Combined Tesco helper: copy/backup basket contents, save a basket to a list with quantities, bulk-save every item to a list on My Favourites / Last Order, and add every product on ANY page to a shopping list via Tesco's own API.
 // @match        https://www.tesco.com/shop/en-GB/*
 // @match        https://www.tesco.com/groceries/en-GB/*
@@ -11,6 +11,7 @@
 // @grant        GM_setClipboard
 // @grant        GM_setValue
 // @grant        GM_getValue
+// @grant        unsafeWindow
 // ==/UserScript==
 
 (function () {
@@ -51,15 +52,12 @@
     }
 
     // ---------- Auth (needed for the API-based add-to-list feature) ----------
-    // Tesco's GraphQL client grabs its own private reference to the native
-    // fetch when its bundle first loads, before any userscript can patch
-    // window.fetch — so passively sniffing outgoing requests never works
-    // reliably here. Instead the user pastes a token captured once from
-    // DevTools (Network tab -> a request to xapi.tesco.com -> the
-    // "authorization" request header), we store it, and reuse it until it
-    // expires (about an hour), at which point we just ask for a fresh one.
+    // Tesco keeps the bearer token in its app runtime rather than normal
+    // browser storage. Watch Tesco's own xapi requests from page context, then
+    // store the short-lived bearer token locally for toolkit API calls.
 
     const STATIC_API_KEY = 'TvOSZJHlEk0pjniDGQFAc9Q59WGAR4dA'; // shared app key, same for every visitor, not a secret
+    const AUTH_CAPTURE_EVENT = 'phaderon-tesco-auth-capture';
 
     function decodeJwtExpiryMs(bearerValue) {
         try {
@@ -81,40 +79,29 @@
         return bearer;
     }
 
-    function extractBearerFromBlob(text) {
-        // Accepts literally anything that contains the token somewhere in it:
-        // a raw header value, a full "Headers" panel copy, a copied cURL/fetch
-        // command, or a whole pasted HAR export. No need to isolate the exact
-        // line by hand.
-        const match = text.match(/Bearer\s+[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+/);
-        return match ? match[0] : null;
+    function getStoredTokenStatus() {
+        const bearer = GM_getValue('tescoBearer', null);
+        const expiresAt = GM_getValue('tescoBearerExpiresAt', 0);
+        if (!bearer || !expiresAt) {
+            return { state: 'missing', label: 'Auth: waiting' };
+        }
+        const remainingMs = expiresAt - Date.now();
+        if (remainingMs <= 0) {
+            return { state: 'expired', label: 'Auth: expired' };
+        }
+        const mins = Math.max(1, Math.floor(remainingMs / 60000));
+        return { state: 'ready', label: `Auth: ${mins}m` };
     }
 
-    function promptForToken() {
-        const pasted = window.prompt(
-            'Need a fresh Tesco auth token.\n\n' +
-            'Open DevTools (F12) -> Network tab -> do anything list-related ' +
-            '(e.g. click a real "Save to list" link) -> click the request to ' +
-            'xapi.tesco.com. Then paste ANYTHING containing it below — the ' +
-            'raw "authorization" header line, a full "Copy as cURL/fetch", the ' +
-            'whole Headers panel, or an entire pasted HAR export all work, ' +
-            'the token will be found automatically:'
-        );
-        if (!pasted) return null;
-
-        const bearerValue = extractBearerFromBlob(pasted);
-        if (!bearerValue) {
-            window.alert('Could not find a "Bearer ..." token anywhere in what was pasted. Nothing was saved.');
-            return null;
-        }
+    function storeBearerToken(bearerValue, source) {
         const expMs = decodeJwtExpiryMs(bearerValue);
-        if (!expMs) {
-            window.alert('Found something starting with "Bearer" but couldn\'t read an expiry from it. Nothing was saved.');
-            return null;
-        }
+        if (!expMs) return false;
         GM_setValue('tescoBearer', bearerValue);
         GM_setValue('tescoBearerExpiresAt', expMs);
-        return bearerValue;
+        GM_setValue('tescoBearerCapturedAt', Date.now());
+        GM_setValue('tescoBearerSource', source || 'tesco xapi request');
+        updateAuthStatusLight();
+        return true;
     }
 
     function getCustomerUuid() {
@@ -122,13 +109,245 @@
             const stored = localStorage.getItem('_ait');
             if (stored) return stored;
         } catch (e) { /* ignore */ }
+        return GM_getValue('tescoCustomerUuid', null);
+    }
+
+    function captureHeaderValue(headers, name) {
+        if (!headers) return null;
+        const wanted = name.toLowerCase();
+        try {
+            if (typeof headers.get === 'function') return headers.get(name) || headers.get(wanted);
+            if (Array.isArray(headers)) {
+                const found = headers.find((pair) => Array.isArray(pair) && String(pair[0]).toLowerCase() === wanted);
+                return found ? found[1] : null;
+            }
+            for (const key of Object.keys(headers)) {
+                if (key.toLowerCase() === wanted) return headers[key];
+            }
+        } catch (e) { /* ignore */ }
         return null;
+    }
+
+    function captureFromRequest(url, headers, source) {
+        if (!url || !String(url).includes('xapi.tesco.com')) return;
+        const bearer = captureHeaderValue(headers, 'authorization');
+        if (bearer && /^Bearer\s+/i.test(String(bearer))) {
+            storeBearerToken(String(bearer), source);
+        }
+        const customerUuid = captureHeaderValue(headers, 'customer-uuid');
+        if (customerUuid) GM_setValue('tescoCustomerUuid', String(customerUuid));
+    }
+
+    function installAuthCapture() {
+        if (window.__phaderonTescoToolkitAuthCapture) return;
+        window.__phaderonTescoToolkitAuthCapture = true;
+
+        window.addEventListener('message', (event) => {
+            if (event.source !== window) return;
+            const data = event.data;
+            if (!data || data.type !== AUTH_CAPTURE_EVENT) return;
+            if (data.bearer) storeBearerToken(data.bearer, data.source);
+            if (data.customerUuid) GM_setValue('tescoCustomerUuid', data.customerUuid);
+        });
+
+        const targetWindow = typeof unsafeWindow === 'undefined' ? window : unsafeWindow;
+        try {
+            const originalFetch = targetWindow.fetch;
+            if (typeof originalFetch === 'function' && !originalFetch.__phaderonTescoWrapped) {
+                const wrappedFetch = function patchedTescoFetch(input, init) {
+                    try {
+                        const url = typeof input === 'string' ? input : input && input.url;
+                        captureFromRequest(url, init && init.headers, 'fetch init headers');
+                        if (input && input.headers) captureFromRequest(url, input.headers, 'fetch request headers');
+                    } catch (e) { /* ignore */ }
+                    return originalFetch.apply(this, arguments);
+                };
+                wrappedFetch.__phaderonTescoWrapped = true;
+                targetWindow.fetch = wrappedFetch;
+            }
+        } catch (e) { /* ignore */ }
+
+        try {
+            const XHR = targetWindow.XMLHttpRequest;
+            if (XHR && XHR.prototype && !XHR.prototype.__phaderonTescoWrapped) {
+                const originalOpen = XHR.prototype.open;
+                const originalSetRequestHeader = XHR.prototype.setRequestHeader;
+                const originalSend = XHR.prototype.send;
+                XHR.prototype.open = function patchedTescoOpen(method, url) {
+                    this.__phaderonTescoUrl = url;
+                    this.__phaderonTescoHeaders = {};
+                    return originalOpen.apply(this, arguments);
+                };
+                XHR.prototype.setRequestHeader = function patchedTescoSetRequestHeader(name, value) {
+                    try {
+                        this.__phaderonTescoHeaders = this.__phaderonTescoHeaders || {};
+                        this.__phaderonTescoHeaders[name] = value;
+                    } catch (e) { /* ignore */ }
+                    return originalSetRequestHeader.apply(this, arguments);
+                };
+                XHR.prototype.send = function patchedTescoSend() {
+                    try {
+                        captureFromRequest(this.__phaderonTescoUrl, this.__phaderonTescoHeaders, 'xhr request headers');
+                    } catch (e) { /* ignore */ }
+                    return originalSend.apply(this, arguments);
+                };
+                XHR.prototype.__phaderonTescoWrapped = true;
+            }
+        } catch (e) { /* ignore */ }
+
+        try {
+            const pageScript = document.createElement('script');
+            pageScript.textContent = `(() => {
+                const EVENT = ${JSON.stringify(AUTH_CAPTURE_EVENT)};
+                if (window.__phaderonTescoToolkitPageCapture) return;
+                window.__phaderonTescoToolkitPageCapture = true;
+
+                function headerValue(headers, name) {
+                    if (!headers) return null;
+                    const wanted = name.toLowerCase();
+                    try {
+                        if (typeof headers.get === 'function') return headers.get(name) || headers.get(wanted);
+                        if (Array.isArray(headers)) {
+                            const found = headers.find((pair) => Array.isArray(pair) && String(pair[0]).toLowerCase() === wanted);
+                            return found ? found[1] : null;
+                        }
+                        for (const key of Object.keys(headers)) {
+                            if (key.toLowerCase() === wanted) return headers[key];
+                        }
+                    } catch (e) {}
+                    return null;
+                }
+
+                function emitAuth(url, headers, source) {
+                    if (!url || !String(url).includes('xapi.tesco.com')) return;
+                    const bearer = headerValue(headers, 'authorization');
+                    if (!bearer || !/^Bearer\\s+/i.test(String(bearer))) return;
+                    window.postMessage({
+                        type: EVENT,
+                        bearer: String(bearer),
+                        customerUuid: headerValue(headers, 'customer-uuid'),
+                        source,
+                    }, '*');
+                }
+
+                const originalFetch = window.fetch;
+                if (typeof originalFetch === 'function' && !originalFetch.__phaderonTescoWrappedPage) {
+                    const wrappedFetch = function patchedTescoPageFetch(input, init) {
+                        try {
+                            const url = typeof input === 'string' ? input : input && input.url;
+                            emitAuth(url, init && init.headers, 'page fetch init headers');
+                            if (input && input.headers) emitAuth(url, input.headers, 'page fetch request headers');
+                        } catch (e) {}
+                        return originalFetch.apply(this, arguments);
+                    };
+                    wrappedFetch.__phaderonTescoWrappedPage = true;
+                    window.fetch = wrappedFetch;
+                }
+
+                const XHR = window.XMLHttpRequest;
+                if (XHR && XHR.prototype && !XHR.prototype.__phaderonTescoWrappedPage) {
+                    const originalOpen = XHR.prototype.open;
+                    const originalSetRequestHeader = XHR.prototype.setRequestHeader;
+                    const originalSend = XHR.prototype.send;
+                    XHR.prototype.open = function patchedTescoPageOpen(method, url) {
+                        this.__phaderonTescoUrl = url;
+                        this.__phaderonTescoHeaders = {};
+                        return originalOpen.apply(this, arguments);
+                    };
+                    XHR.prototype.setRequestHeader = function patchedTescoPageSetHeader(name, value) {
+                        try {
+                            this.__phaderonTescoHeaders = this.__phaderonTescoHeaders || {};
+                            this.__phaderonTescoHeaders[name] = value;
+                        } catch (e) {}
+                        return originalSetRequestHeader.apply(this, arguments);
+                    };
+                    XHR.prototype.send = function patchedTescoPageSend() {
+                        try {
+                            emitAuth(this.__phaderonTescoUrl, this.__phaderonTescoHeaders, 'page xhr request headers');
+                        } catch (e) {}
+                        return originalSend.apply(this, arguments);
+                    };
+                    XHR.prototype.__phaderonTescoWrappedPage = true;
+                }
+            })();`;
+            const parent = document.documentElement || document.head || document.body;
+            if (parent) {
+                parent.appendChild(pageScript);
+                pageScript.remove();
+            }
+        } catch (e) { /* ignore */ }
+    }
+
+    function updateAuthStatusLight() {
+        if (!document.body) return;
+
+        let box = document.getElementById('tesco-auth-status');
+        if (!box) {
+            box = document.createElement('div');
+            box.id = 'tesco-auth-status';
+            box.style.position = 'fixed';
+            box.style.right = '20px';
+            box.style.bottom = '170px';
+            box.style.zIndex = '99999';
+            box.style.display = 'flex';
+            box.style.alignItems = 'center';
+            box.style.gap = '8px';
+            box.style.padding = '8px 10px';
+            box.style.background = '#ffffff';
+            box.style.color = '#1f2933';
+            box.style.border = '1px solid #d5dce5';
+            box.style.borderRadius = '6px';
+            box.style.boxShadow = '0 2px 8px rgba(0,0,0,0.2)';
+            box.style.fontSize = '12px';
+            box.style.fontWeight = '700';
+
+            const dot = document.createElement('span');
+            dot.id = 'tesco-auth-status-dot';
+            dot.style.width = '11px';
+            dot.style.height = '11px';
+            dot.style.borderRadius = '50%';
+            dot.style.display = 'inline-block';
+            dot.style.boxShadow = '0 0 0 2px rgba(0,0,0,0.08)';
+
+            const label = document.createElement('span');
+            label.id = 'tesco-auth-status-label';
+
+            box.appendChild(dot);
+            box.appendChild(label);
+            document.body.appendChild(box);
+        }
+
+        const status = getStoredTokenStatus();
+        const dot = document.getElementById('tesco-auth-status-dot');
+        const label = document.getElementById('tesco-auth-status-label');
+        if (!dot || !label) return;
+
+        label.textContent = status.label;
+        if (status.state === 'ready') {
+            dot.style.background = '#128a2e';
+            box.title = 'Tesco Toolkit has captured a usable auth token for this session.';
+        } else if (status.state === 'expired') {
+            dot.style.background = '#d97706';
+            box.title = 'Tesco auth expired. Browse Tesco normally or use a Tesco list/basket action so the toolkit can capture a fresh token.';
+        } else {
+            dot.style.background = '#b91c1c';
+            box.title = 'Waiting for Tesco auth. Browse Tesco normally or use a Tesco list/basket action so the toolkit can capture the token automatically.';
+        }
+    }
+
+    function showNeedAuth(btn, originalText) {
+        updateAuthStatusLight();
+        btn.textContent = 'Need auth';
+        setTimeout(() => {
+            btn.textContent = originalText;
+            btn.dataset.running = '0';
+        }, 3500);
     }
 
     async function tescoApiCall(operations) {
         let bearer = getStoredToken();
         if (!bearer) {
-            bearer = promptForToken();
+            updateAuthStatusLight();
         }
         if (!bearer) {
             throw new Error('NO_AUTH');
@@ -150,11 +369,12 @@
         });
 
         if (res.status === 401 || res.status === 403) {
-            // Stored token was rejected (expired/invalid) — clear it and ask once more.
+            // Stored token was rejected. Clear it and let the capture layer
+            // learn the next token from normal Tesco page activity.
             GM_setValue('tescoBearer', null);
-            const fresh = promptForToken();
-            if (!fresh) throw new Error('NO_AUTH');
-            return tescoApiCall(operations);
+            GM_setValue('tescoBearerExpiresAt', 0);
+            updateAuthStatusLight();
+            throw new Error('NO_AUTH');
         }
 
         const json = await res.json();
@@ -372,7 +592,11 @@
             return;
         }
         if (choice.error) {
-            btn.textContent = choice.error.message === 'NO_AUTH' ? 'No token entered' : 'Failed to load lists';
+            if (choice.error.message === 'NO_AUTH') {
+                showNeedAuth(btn, original);
+                return;
+            }
+            btn.textContent = 'Failed to load lists';
             setTimeout(() => {
                 btn.textContent = original;
                 btn.dataset.running = '0';
@@ -593,7 +817,7 @@
             }
             if (choice.error) {
                 const message = choice.error && choice.error.message === 'NO_AUTH'
-                    ? 'No token entered'
+                    ? 'Need auth'
                     : 'Failed to load lists';
                 btn.textContent = message;
                 setTimeout(() => {
@@ -626,11 +850,14 @@
 
     function initAll() {
         if (!document.body) return;
+        installAuthCapture();
+        updateAuthStatusLight();
         initBasketCopy();
         initBulkSaveByClicking();
         initApiAddToList();
     }
 
+    installAuthCapture();
     initAll();
     // Tesco's pages re-render content asynchronously, so keep checking
     // in case our buttons get removed or the relevant content loads late.
