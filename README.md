@@ -19,6 +19,9 @@ the page it's relevant to:
 - **Save Basket To List** — trolley page, saves the current basket into a
   Tesco shopping list with quantities preserved, so it can be re-added after
   switching/editing the correct delivery slot
+- **Copy XAPI Trace** — trolley page diagnostic recorder for sanitized Tesco
+  `xapi.tesco.com` request bodies, used to reverse-engineer direct basket
+  quantity transfer without opening DevTools
 - **Save All To List (click automation)** — My Favourites / Last Order,
   clicks every "Save to list" link in sequence and dismisses the popup
 - **Add Item(s) To List (API)** — works on *any* page, including order
@@ -88,6 +91,17 @@ Use this when a basket was built against the wrong delivery slot/order:
 This intentionally uses Tesco's shopping-list API as the bridge. Direct
 basket-to-basket injection is not implemented yet because the captured HAR only
 covered shopping-list calls, not Tesco's basket/trolley mutation.
+
+To capture the missing basket mutation for a future direct-transfer version:
+
+1. Install v3.4 or newer and reload the Tesco trolley page.
+2. Right-click **Copy XAPI Trace** once to clear old captured calls.
+3. Perform one normal Tesco basket action, such as increasing one item's
+   quantity by one, decreasing it again, or adding one item to the basket.
+4. Click **Copy XAPI Trace** and paste the copied JSON back to the assistant.
+
+The trace intentionally stores request bodies and basket/product metadata only,
+not authorization headers.
 
 ### Tesco Bulk Save to List (`scripts/tesco-bulk-save-to-list.user.js`)
 

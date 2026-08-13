@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Tesco Toolkit (All-in-One)
 // @namespace    phaderon.tesco.toolkit
-// @version      3.3
-// @description  Combined Tesco helper: copy/backup basket contents, save a basket to a list with quantities, bulk-save every item to a list on My Favourites / Last Order, and add every product on ANY page to a shopping list via Tesco's own API.
+// @version      3.4
+// @description  Combined Tesco helper: copy/backup basket contents, save a basket to a list with quantities, record basket API traces, bulk-save every item to a list on My Favourites / Last Order, and add every product on ANY page to a shopping list via Tesco's own API.
 // @match        https://www.tesco.com/shop/en-GB/*
 // @match        https://www.tesco.com/groceries/en-GB/*
 // @downloadURL  https://raw.githubusercontent.com/PhadeDev/tesco-toolkit/master/scripts/tesco-toolkit.user.js
@@ -58,6 +58,7 @@
 
     const STATIC_API_KEY = 'TvOSZJHlEk0pjniDGQFAc9Q59WGAR4dA'; // shared app key, same for every visitor, not a secret
     const AUTH_CAPTURE_EVENT = 'phaderon-tesco-auth-capture';
+    const XAPI_CAPTURE_EVENT = 'phaderon-tesco-xapi-capture';
 
     function decodeJwtExpiryMs(bearerValue) {
         try {
@@ -128,8 +129,64 @@
         return null;
     }
 
-    function captureFromRequest(url, headers, source) {
+    function safeParseJson(text) {
+        if (typeof text !== 'string') return null;
+        try {
+            return JSON.parse(text);
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function summarizeXapiBody(body) {
+        if (body == null) return { rawType: 'empty' };
+        if (typeof body !== 'string') return { rawType: Object.prototype.toString.call(body) };
+
+        const parsed = safeParseJson(body);
+        if (!parsed) {
+            return {
+                rawType: 'string',
+                length: body.length,
+                preview: body.slice(0, 500),
+            };
+        }
+
+        const operations = Array.isArray(parsed) ? parsed : [parsed];
+        return operations.map((operation) => ({
+            operationName: operation && operation.operationName,
+            variables: operation && operation.variables,
+            extensions: operation && operation.extensions,
+            query: operation && operation.query,
+        }));
+    }
+
+    function recordXapiRequest(url, body, source) {
         if (!url || !String(url).includes('xapi.tesco.com')) return;
+
+        const record = {
+            capturedAt: new Date().toISOString(),
+            pageUrl: location.href,
+            source,
+            url: String(url),
+            body: summarizeXapiBody(body),
+        };
+
+        let trace = [];
+        try {
+            trace = JSON.parse(GM_getValue('tescoXapiTrace', '[]'));
+            if (!Array.isArray(trace)) trace = [];
+        } catch (e) {
+            trace = [];
+        }
+        trace.push(record);
+        trace = trace.slice(-50);
+        GM_setValue('tescoXapiTrace', JSON.stringify(trace, null, 2));
+        updateTraceButton();
+    }
+
+    function captureFromRequest(url, headers, source, body) {
+        if (!url || !String(url).includes('xapi.tesco.com')) return;
+        recordXapiRequest(url, body, source);
         const bearer = captureHeaderValue(headers, 'authorization');
         if (bearer && /^Bearer\s+/i.test(String(bearer))) {
             storeBearerToken(String(bearer), source);
@@ -149,6 +206,12 @@
             if (data.bearer) storeBearerToken(data.bearer, data.source);
             if (data.customerUuid) GM_setValue('tescoCustomerUuid', data.customerUuid);
         });
+        window.addEventListener('message', (event) => {
+            if (event.source !== window) return;
+            const data = event.data;
+            if (!data || data.type !== XAPI_CAPTURE_EVENT) return;
+            recordXapiRequest(data.url, data.body, data.source);
+        });
 
         const targetWindow = typeof unsafeWindow === 'undefined' ? window : unsafeWindow;
         try {
@@ -157,8 +220,8 @@
                 const wrappedFetch = function patchedTescoFetch(input, init) {
                     try {
                         const url = typeof input === 'string' ? input : input && input.url;
-                        captureFromRequest(url, init && init.headers, 'fetch init headers');
-                        if (input && input.headers) captureFromRequest(url, input.headers, 'fetch request headers');
+                        captureFromRequest(url, init && init.headers, 'fetch init headers', init && init.body);
+                        if (input && input.headers) captureFromRequest(url, input.headers, 'fetch request headers', init && init.body);
                     } catch (e) { /* ignore */ }
                     return originalFetch.apply(this, arguments);
                 };
@@ -185,9 +248,9 @@
                     } catch (e) { /* ignore */ }
                     return originalSetRequestHeader.apply(this, arguments);
                 };
-                XHR.prototype.send = function patchedTescoSend() {
+                XHR.prototype.send = function patchedTescoSend(body) {
                     try {
-                        captureFromRequest(this.__phaderonTescoUrl, this.__phaderonTescoHeaders, 'xhr request headers');
+                        captureFromRequest(this.__phaderonTescoUrl, this.__phaderonTescoHeaders, 'xhr request headers', body);
                     } catch (e) { /* ignore */ }
                     return originalSend.apply(this, arguments);
                 };
@@ -198,7 +261,8 @@
         try {
             const pageScript = document.createElement('script');
             pageScript.textContent = `(() => {
-                const EVENT = ${JSON.stringify(AUTH_CAPTURE_EVENT)};
+                const AUTH_EVENT = ${JSON.stringify(AUTH_CAPTURE_EVENT)};
+                const XAPI_EVENT = ${JSON.stringify(XAPI_CAPTURE_EVENT)};
                 if (window.__phaderonTescoToolkitPageCapture) return;
                 window.__phaderonTescoToolkitPageCapture = true;
 
@@ -218,12 +282,34 @@
                     return null;
                 }
 
+                function emitXapi(url, body, source) {
+                    if (!url || !String(url).includes('xapi.tesco.com')) return;
+                    let bodyText = null;
+                    if (typeof body === 'string') {
+                        bodyText = body;
+                    } else if (body == null) {
+                        bodyText = null;
+                    } else {
+                        try {
+                            bodyText = String(body);
+                        } catch (e) {
+                            bodyText = '[unserializable body]';
+                        }
+                    }
+                    window.postMessage({
+                        type: XAPI_EVENT,
+                        url: String(url),
+                        body: bodyText,
+                        source,
+                    }, '*');
+                }
+
                 function emitAuth(url, headers, source) {
                     if (!url || !String(url).includes('xapi.tesco.com')) return;
                     const bearer = headerValue(headers, 'authorization');
                     if (!bearer || !/^Bearer\\s+/i.test(String(bearer))) return;
                     window.postMessage({
-                        type: EVENT,
+                        type: AUTH_EVENT,
                         bearer: String(bearer),
                         customerUuid: headerValue(headers, 'customer-uuid'),
                         source,
@@ -235,6 +321,7 @@
                     const wrappedFetch = function patchedTescoPageFetch(input, init) {
                         try {
                             const url = typeof input === 'string' ? input : input && input.url;
+                            emitXapi(url, init && init.body, 'page fetch body');
                             emitAuth(url, init && init.headers, 'page fetch init headers');
                             if (input && input.headers) emitAuth(url, input.headers, 'page fetch request headers');
                         } catch (e) {}
@@ -261,8 +348,9 @@
                         } catch (e) {}
                         return originalSetRequestHeader.apply(this, arguments);
                     };
-                    XHR.prototype.send = function patchedTescoPageSend() {
+                    XHR.prototype.send = function patchedTescoPageSend(body) {
                         try {
+                            emitXapi(this.__phaderonTescoUrl, body, 'page xhr body');
                             emitAuth(this.__phaderonTescoUrl, this.__phaderonTescoHeaders, 'page xhr request headers');
                         } catch (e) {}
                         return originalSend.apply(this, arguments);
@@ -342,6 +430,81 @@
             btn.textContent = originalText;
             btn.dataset.running = '0';
         }, 3500);
+    }
+
+    function getStoredXapiTrace() {
+        try {
+            const trace = JSON.parse(GM_getValue('tescoXapiTrace', '[]'));
+            return Array.isArray(trace) ? trace : [];
+        } catch (e) {
+            return [];
+        }
+    }
+
+    function updateTraceButton() {
+        const btn = document.getElementById('xapi-trace-copy-btn');
+        if (!btn) return;
+        const trace = getStoredXapiTrace();
+        btn.textContent = trace.length === 0 ? 'Copy XAPI Trace' : `Copy XAPI Trace (${trace.length})`;
+    }
+
+    function copyXapiTrace(btn) {
+        const snapshot = buildBasketSnapshot();
+        const trace = getStoredXapiTrace();
+        const payload = {
+            schema: 'phaderon.tesco.xapi-trace.v1',
+            copiedAt: new Date().toISOString(),
+            pageUrl: location.href,
+            authStatus: getStoredTokenStatus(),
+            basketSnapshot: snapshot,
+            trace,
+        };
+        const text = JSON.stringify(payload, null, 2);
+
+        if (typeof GM_setClipboard === 'function') {
+            GM_setClipboard(text, 'text');
+        } else {
+            navigator.clipboard.writeText(text);
+        }
+
+        const original = btn.textContent;
+        btn.textContent = 'Trace copied';
+        setTimeout(() => {
+            updateTraceButton();
+            if (btn.textContent === 'Trace copied') btn.textContent = original;
+        }, 1800);
+    }
+
+    function clearXapiTrace(btn) {
+        GM_setValue('tescoXapiTrace', '[]');
+        updateTraceButton();
+        const original = btn.textContent;
+        btn.textContent = 'Trace cleared';
+        setTimeout(() => {
+            updateTraceButton();
+            if (btn.textContent === 'Trace cleared') btn.textContent = original;
+        }, 1500);
+    }
+
+    function initTraceControls() {
+        if (!isTrolleyPage()) {
+            const existing = document.getElementById('xapi-trace-copy-btn');
+            if (existing) existing.remove();
+            return;
+        }
+
+        let btn = document.getElementById('xapi-trace-copy-btn');
+        if (!btn) {
+            btn = makeFloatingButton('xapi-trace-copy-btn', 'Copy XAPI Trace', 220);
+            btn.title = 'After doing a normal Tesco basket action, click to copy sanitized xapi request details for building direct basket transfer.';
+            btn.addEventListener('click', () => copyXapiTrace(btn));
+            btn.addEventListener('contextmenu', (event) => {
+                event.preventDefault();
+                clearXapiTrace(btn);
+            });
+            document.body.appendChild(btn);
+        }
+        updateTraceButton();
     }
 
     async function tescoApiCall(operations) {
@@ -852,6 +1015,7 @@
         if (!document.body) return;
         installAuthCapture();
         updateAuthStatusLight();
+        initTraceControls();
         initBasketCopy();
         initBulkSaveByClicking();
         initApiAddToList();
