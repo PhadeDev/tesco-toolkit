@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Tesco Toolkit (All-in-One)
 // @namespace    phaderon.tesco.toolkit
-// @version      3.4
-// @description  Combined Tesco helper: copy/backup basket contents, save a basket to a list with quantities, record basket API traces, bulk-save every item to a list on My Favourites / Last Order, and add every product on ANY page to a shopping list via Tesco's own API.
+// @version      4.0
+// @description  Combined Tesco helper: copy/backup basket contents, apply saved baskets directly with quantities, save baskets to lists, record basket API traces, bulk-save every item to a list on My Favourites / Last Order, and add page products to a shopping list via Tesco's own API.
 // @match        https://www.tesco.com/shop/en-GB/*
 // @match        https://www.tesco.com/groceries/en-GB/*
 // @downloadURL  https://raw.githubusercontent.com/PhadeDev/tesco-toolkit/master/scripts/tesco-toolkit.user.js
@@ -375,7 +375,7 @@
             box.id = 'tesco-auth-status';
             box.style.position = 'fixed';
             box.style.right = '20px';
-            box.style.bottom = '170px';
+            box.style.bottom = '270px';
             box.style.zIndex = '99999';
             box.style.display = 'flex';
             box.style.alignItems = 'center';
@@ -568,6 +568,23 @@
         return addItemsToList(tpnbs.map((tpnb) => ({ tpnb: tpnb, quantity: 1 })), listId);
     }
 
+    function updateBasketQuantities(items) {
+        return tescoApiCall([{
+            operationName: 'UpdateBasket',
+            variables: {
+                items: items.map((item) => ({
+                    adjustment: false,
+                    id: item.id,
+                    newValue: item.quantity,
+                    newUnitChoice: 'pcs',
+                    substitutionOption: item.substitutionOption || 'FindSuitableAlternative',
+                })),
+            },
+            extensions: { mfeName: 'mfe-basket-manager' },
+            query: 'mutation UpdateBasket($items: [BasketLineItemInputType], $orderId: ID) {\n  basket(items: $items, orderId: $orderId) {\n    id\n    items {\n      id\n      quantity\n      unit\n      product {\n        id\n        __typename\n      }\n      __typename\n    }\n    updates {\n      items {\n        id\n        successful\n        __typename\n      }\n      __typename\n    }\n    __typename\n  }\n}\n',
+        }]);
+    }
+
     // ---------- Extract products embedded in the page's own prefetched data ----------
     // Every Tesco page embeds a <script type="application/discover+json"> blob with
     // prefetched data for its micro-frontends. Buried in there (regardless of which
@@ -676,6 +693,36 @@
         };
     }
 
+    function extractProductIdFromHref(href) {
+        return (String(href || '').match(/\/products\/(\d+)/) || [])[1] || null;
+    }
+
+    function getStoredBasketSnapshot() {
+        try {
+            const snapshot = JSON.parse(GM_getValue('lastBasketSnapshot', 'null'));
+            if (!snapshot || !Array.isArray(snapshot.items)) return null;
+            return snapshot;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function basketSnapshotToUpdateItems(snapshot) {
+        const seen = new Set();
+        return (snapshot.items || []).map((item) => {
+            const id = item.tpnc || extractProductIdFromHref(item.href);
+            const quantity = parseInt(item.quantity, 10);
+            if (!id || !quantity || quantity < 1 || seen.has(id)) return null;
+            seen.add(id);
+            return {
+                id,
+                title: item.title || id,
+                quantity,
+                substitutionOption: item.substitutionOption || 'FindSuitableAlternative',
+            };
+        }).filter(Boolean);
+    }
+
     function buildBasketText() {
         const items = extractBasketItems();
         const lines = [];
@@ -782,37 +829,109 @@
         }, 3500);
     }
 
+    async function applySavedBasketToCurrentTrolley(btn) {
+        const snapshot = getStoredBasketSnapshot();
+        if (!snapshot) {
+            window.alert('No saved basket snapshot found. Go to the source trolley first and click "Backup Basket JSON".');
+            return;
+        }
+
+        const updateItems = basketSnapshotToUpdateItems(snapshot);
+        if (updateItems.length === 0) {
+            window.alert('The saved basket snapshot did not contain usable Tesco product IDs.');
+            return;
+        }
+
+        const totalQty = updateItems.reduce((sum, item) => sum + item.quantity, 0);
+        const ok = window.confirm(
+            `Apply saved basket to the CURRENT Tesco trolley?\n\n` +
+            `Saved: ${updateItems.length} products, ${totalQty} total quantity.\n\n` +
+            'This sets these product quantities in the current active basket. It does not remove any extra items already in this basket.'
+        );
+        if (!ok) return;
+
+        btn.dataset.running = '1';
+        const original = btn.textContent;
+        btn.textContent = `Applying ${updateItems.length}...`;
+
+        try {
+            const response = await updateBasketQuantities(updateItems);
+            const updates = (((response[0] || {}).data || {}).basket || {}).updates || {};
+            const results = Array.isArray(updates.items) ? updates.items : [];
+            const failed = results.filter((item) => item && item.successful === false);
+
+            if (failed.length > 0) {
+                btn.textContent = `${failed.length} failed`;
+                console.warn('Tesco Toolkit: some basket updates failed', failed, response);
+            } else {
+                btn.textContent = 'Applied, reloading...';
+                setTimeout(() => location.reload(), 1200);
+                return;
+            }
+        } catch (e) {
+            if (e && e.message === 'NO_AUTH') {
+                showNeedAuth(btn, original);
+                return;
+            }
+            btn.textContent = 'Failed, see console';
+            console.error('Tesco Toolkit: apply saved basket failed', e);
+        }
+
+        setTimeout(() => {
+            btn.textContent = original;
+            btn.dataset.running = '0';
+        }, 4000);
+    }
+
     function initBasketCopy() {
         const existing = document.getElementById('basket-copy-btn');
         const backupExisting = document.getElementById('basket-backup-btn');
         const saveExisting = document.getElementById('basket-save-list-btn');
+        const applyExisting = document.getElementById('basket-apply-snapshot-btn');
         const onTrolleyPage = isTrolleyPage();
         const hasBasketItems = getBasketDomItems().length > 0;
 
-        if (!onTrolleyPage || !hasBasketItems) {
+        if (!onTrolleyPage) {
             if (existing) existing.remove();
             if (backupExisting) backupExisting.remove();
             if (saveExisting) saveExisting.remove();
+            if (applyExisting) applyExisting.remove();
             return;
         }
 
-        if (!existing) {
+        if (!hasBasketItems) {
+            if (existing) existing.remove();
+            if (backupExisting) backupExisting.remove();
+            if (saveExisting) saveExisting.remove();
+        }
+
+        if (hasBasketItems && !existing) {
             const btn = makeFloatingButton('basket-copy-btn', 'Copy Basket List', 20);
             btn.addEventListener('click', () => copyBasket(btn));
             document.body.appendChild(btn);
         }
 
-        if (!backupExisting) {
+        if (hasBasketItems && !backupExisting) {
             const btn = makeFloatingButton('basket-backup-btn', 'Backup Basket JSON', 70);
             btn.addEventListener('click', () => copyBasketSnapshot(btn));
             document.body.appendChild(btn);
         }
 
-        if (!saveExisting) {
+        if (hasBasketItems && !saveExisting) {
             const btn = makeFloatingButton('basket-save-list-btn', 'Save Basket To List', 120);
             btn.addEventListener('click', () => {
                 if (btn.dataset.running === '1') return;
                 saveBasketToList(btn);
+            });
+            document.body.appendChild(btn);
+        }
+
+        if (!applyExisting) {
+            const btn = makeFloatingButton('basket-apply-snapshot-btn', 'Apply Saved Basket', 170);
+            btn.title = 'Applies the last backed-up basket directly to the current Tesco trolley, preserving quantities.';
+            btn.addEventListener('click', () => {
+                if (btn.dataset.running === '1') return;
+                applySavedBasketToCurrentTrolley(btn);
             });
             document.body.appendChild(btn);
         }

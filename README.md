@@ -16,6 +16,8 @@ the page it's relevant to:
 - **Copy Basket List** — trolley page, copies the basket contents to clipboard
 - **Backup Basket JSON** — trolley page, copies/stores a structured basket
   snapshot with titles, quantities, product URLs, and Tesco product numbers
+- **Apply Saved Basket** — trolley page, applies the last backed-up basket
+  directly to the current active Tesco trolley with quantities preserved
 - **Save Basket To List** — trolley page, saves the current basket into a
   Tesco shopping list with quantities preserved, so it can be re-added after
   switching/editing the correct delivery slot
@@ -82,17 +84,18 @@ Use this when a basket was built against the wrong delivery slot/order:
 1. Stay on the wrong trolley while the items are still visible.
 2. Click **Backup Basket JSON**. This copies a structured fallback snapshot
    and stores it in Violentmonkey storage.
-3. Click **Save Basket To List** and choose a Tesco shopping list. The script
-   saves matched basket items to that list with their quantities.
-4. Switch/edit the correct delivery slot/order in Tesco.
-5. Open the Tesco list and use Tesco's own list-to-basket controls to add the
-   saved items back into the active basket.
+3. Switch/edit the correct delivery slot/order in Tesco.
+4. Go to the trolley for the correct active order.
+5. Click **Apply Saved Basket**. The script calls Tesco's `UpdateBasket`
+   mutation directly and sets each backed-up product to its saved quantity.
+6. Tesco reloads the trolley after a successful apply so the on-page totals
+   catch up.
 
-This intentionally uses Tesco's shopping-list API as the bridge. Direct
-basket-to-basket injection is not implemented yet because the captured HAR only
-covered shopping-list calls, not Tesco's basket/trolley mutation.
+`Save Basket To List` remains available as a fallback/archive step, but Tesco's
+own list-to-basket flow does not preserve quantities, so it is no longer the
+preferred transfer path.
 
-To capture the missing basket mutation for a future direct-transfer version:
+To capture basket API details for future debugging:
 
 1. Install v3.4 or newer and reload the Tesco trolley page.
 2. Right-click **Copy XAPI Trace** once to clear old captured calls.
@@ -101,7 +104,9 @@ To capture the missing basket mutation for a future direct-transfer version:
 4. Click **Copy XAPI Trace** and paste the copied JSON back to the assistant.
 
 The trace intentionally stores request bodies and basket/product metadata only,
-not authorization headers.
+not authorization headers. v4.0 was built from a captured `UpdateBasket`
+mutation shaped as `items: [{ id, newValue, newUnitChoice: "pcs",
+substitutionOption: "FindSuitableAlternative" }]`.
 
 ### Tesco Bulk Save to List (`scripts/tesco-bulk-save-to-list.user.js`)
 
