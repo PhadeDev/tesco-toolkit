@@ -6,10 +6,19 @@ A growing collection of Violentmonkey/Tampermonkey userscripts for Tesco's groce
 
 ### Tesco Toolkit — All-in-One (`scripts/tesco-toolkit.user.js`)
 
-**Recommended install.** One userscript, three features, each only active on
+**Recommended install.** One userscript, five features, each only active on
 the page it's relevant to:
 
+- Main script: `scripts/tesco-toolkit.user.js`
+- Raw install URL:
+  `https://raw.githubusercontent.com/PhadeDev/tesco-toolkit/master/scripts/tesco-toolkit.user.js`
+
 - **Copy Basket List** — trolley page, copies the basket contents to clipboard
+- **Backup Basket JSON** — trolley page, copies/stores a structured basket
+  snapshot with titles, quantities, product URLs, and Tesco product numbers
+- **Save Basket To List** — trolley page, saves the current basket into a
+  Tesco shopping list with quantities preserved, so it can be re-added after
+  switching/editing the correct delivery slot
 - **Save All To List (click automation)** — My Favourites / Last Order,
   clicks every "Save to list" link in sequence and dismisses the popup
 - **Add Item(s) To List (API)** — works on *any* page, including order
@@ -40,10 +49,10 @@ token expires, roughly hourly — it'll prompt you to paste one:
    isolate the exact line by hand.
 
 Note this only matters for pages with no native "Save to list" control at
-all (order receipts, the basket). My Favourites / Last Order / Previously
-Bought have a real clickable "Save to list" link Tesco built themselves —
-use the "Save All To List" click-automation button there instead, which
-needs no token at all.
+all (order receipts, and the trolley-only **Save Basket To List** bridge).
+My Favourites / Last Order / Previously Bought have a real clickable
+"Save to list" link Tesco built themselves — use the "Save All To List"
+click-automation button there instead, which needs no token at all.
 
 It's stored locally via Violentmonkey's own storage (`GM_setValue`) and
 reused until it expires. Nothing is hardcoded in the script except a
@@ -64,6 +73,23 @@ to the clipboard.
 
 - Matches `tesco.com/shop/en-GB/trolley*` and `tesco.com/groceries/en-GB/trolley*`
 - Re-adds the button every 2s to survive the trolley page's async re-renders
+
+### Basket Rescue / Slot Transfer Workflow
+
+Use this when a basket was built against the wrong delivery slot/order:
+
+1. Stay on the wrong trolley while the items are still visible.
+2. Click **Backup Basket JSON**. This copies a structured fallback snapshot
+   and stores it in Violentmonkey storage.
+3. Click **Save Basket To List** and choose a Tesco shopping list. The script
+   saves matched basket items to that list with their quantities.
+4. Switch/edit the correct delivery slot/order in Tesco.
+5. Open the Tesco list and use Tesco's own list-to-basket controls to add the
+   saved items back into the active basket.
+
+This intentionally uses Tesco's shopping-list API as the bridge. Direct
+basket-to-basket injection is not implemented yet because the captured HAR only
+covered shopping-list calls, not Tesco's basket/trolley mutation.
 
 ### Tesco Bulk Save to List (`scripts/tesco-bulk-save-to-list.user.js`)
 

@@ -1,10 +1,12 @@
 // ==UserScript==
 // @name         Tesco Toolkit (All-in-One)
 // @namespace    phaderon.tesco.toolkit
-// @version      3.1
-// @description  Combined Tesco helper: copy basket list to clipboard on the trolley page, bulk-save every item to a list on My Favourites / Last Order, and add every product on ANY page (order receipts, product pages, anywhere) to a shopping list via Tesco's own API.
+// @version      3.2
+// @description  Combined Tesco helper: copy/backup basket contents, save a basket to a list with quantities, bulk-save every item to a list on My Favourites / Last Order, and add every product on ANY page to a shopping list via Tesco's own API.
 // @match        https://www.tesco.com/shop/en-GB/*
 // @match        https://www.tesco.com/groceries/en-GB/*
+// @downloadURL  https://raw.githubusercontent.com/PhadeDev/tesco-toolkit/master/scripts/tesco-toolkit.user.js
+// @updateURL    https://raw.githubusercontent.com/PhadeDev/tesco-toolkit/master/scripts/tesco-toolkit.user.js
 // @run-at       document-start
 // @grant        GM_setClipboard
 // @grant        GM_setValue
@@ -168,8 +170,7 @@
         }]);
     }
 
-    function addProductsToList(tpnbs, listId) {
-        const listItems = tpnbs.map((tpnb) => ({ tpnb: tpnb, quantity: 1 }));
+    function addItemsToList(listItems, listId) {
         const variables = { listType: 'CUSTOM', listItems: listItems };
         if (listId) variables.listId = listId;
         return tescoApiCall([{
@@ -178,6 +179,10 @@
             extensions: { mfeName: 'mfe-global-scripts' },
             query: 'mutation UpdateShoppingListItem($listType: ShoppingListTypeEnums!, $listId: ID, $listItems: [ShoppingListItems]!, $limit: Int, $offset: Int) {\n  updateShoppingListItem(\n    listType: $listType\n    listId: $listId\n    listItems: $listItems\n    limit: $limit\n    offset: $offset\n  ) {\n    id\n    name\n    __typename\n  }\n}\n',
         }]);
+    }
+
+    function addProductsToList(tpnbs, listId) {
+        return addItemsToList(tpnbs.map((tpnb) => ({ tpnb: tpnb, quantity: 1 })), listId);
     }
 
     // ---------- Extract products embedded in the page's own prefetched data ----------
@@ -195,7 +200,11 @@
         if (typeof node.tpnb === 'string' && typeof node.title === 'string') {
             if (!seen.has(node.tpnb)) {
                 seen.add(node.tpnb);
-                out.push({ tpnb: node.tpnb, title: node.title });
+                out.push({
+                    tpnb: node.tpnb,
+                    tpnc: node.tpnc == null ? null : String(node.tpnc),
+                    title: node.title,
+                });
             }
         }
         for (const key in node) {
@@ -225,25 +234,75 @@
 
     // ---------- Basket Copy List (trolley page) ----------
 
+    function normalizeProductTitle(value) {
+        return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+    }
+
+    function isTrolleyPage() {
+        return /\/(shop|groceries)\/en-GB\/trolley/.test(location.pathname);
+    }
+
+    function getBasketDomItems() {
+        return Array.from(document.querySelectorAll('li[data-testid="product-list-item"]'));
+    }
+
+    function extractBasketItems() {
+        const pageProducts = extractPageProducts();
+        const byTitle = new Map();
+        const byTpnc = new Map();
+
+        pageProducts.forEach((product) => {
+            byTitle.set(normalizeProductTitle(product.title), product);
+            if (product.tpnc) byTpnc.set(String(product.tpnc), product);
+        });
+
+        return getBasketDomItems().map((item) => {
+            const nameEl = item.querySelector('._1bCRSG_titleContainer a');
+            const priceEl = item.querySelector('._1bCRSG_priceText');
+            const qtyInput = item.querySelector('input[data-auto="ddsweb-quantity-controls-input"]');
+            if (!nameEl || !qtyInput) return null;
+
+            const title = nameEl.textContent.trim();
+            const href = nameEl.href || nameEl.getAttribute('href') || '';
+            const productUrlId = (href.match(/\/products\/(\d+)/) || [])[1] || null;
+            const discovered = (productUrlId && byTpnc.get(productUrlId)) || byTitle.get(normalizeProductTitle(title));
+            const unitPrice = priceEl ? parseFloat(priceEl.textContent.replace(/[^\d.]/g, '')) : null;
+            const quantity = parseInt(qtyInput.value, 10) || 1;
+
+            return {
+                title,
+                tpnb: discovered ? discovered.tpnb : null,
+                tpnc: discovered ? discovered.tpnc : productUrlId,
+                quantity,
+                unitPrice: isNaN(unitPrice) ? null : unitPrice,
+                lineTotal: isNaN(unitPrice) ? null : unitPrice * quantity,
+                href,
+            };
+        }).filter(Boolean);
+    }
+
+    function buildBasketSnapshot() {
+        const items = extractBasketItems();
+        return {
+            schema: 'phaderon.tesco.basket-snapshot.v1',
+            savedAt: new Date().toISOString(),
+            sourceUrl: location.href,
+            itemCount: items.length,
+            totalQuantity: items.reduce((sum, item) => sum + item.quantity, 0),
+            items,
+        };
+    }
+
     function buildBasketText() {
-        const items = document.querySelectorAll('li[data-testid="product-list-item"]');
+        const items = extractBasketItems();
         const lines = [];
         let grandTotal = 0;
 
         items.forEach((item) => {
-            const nameEl = item.querySelector('._1bCRSG_titleContainer a');
-            const priceEl = item.querySelector('._1bCRSG_priceText');
-            const qtyInput = item.querySelector('input[data-auto="ddsweb-quantity-controls-input"]');
-
-            if (!nameEl || !priceEl || !qtyInput) return;
-
-            const name = nameEl.textContent.trim();
-            const unitPrice = parseFloat(priceEl.textContent.replace(/[^\d.]/g, ''));
-            const qty = parseInt(qtyInput.value, 10) || 1;
-            const lineTotal = unitPrice * qty;
-            grandTotal += lineTotal;
-
-            lines.push(`${name} - £${unitPrice.toFixed(2)} x ${qty} = £${lineTotal.toFixed(2)}`);
+            if (item.lineTotal != null) grandTotal += item.lineTotal;
+            const unit = item.unitPrice == null ? '£?.??' : `£${item.unitPrice.toFixed(2)}`;
+            const total = item.lineTotal == null ? '£?.??' : `£${item.lineTotal.toFixed(2)}`;
+            lines.push(`${item.title} - ${unit} x ${item.quantity} = ${total}`);
         });
 
         lines.push('');
@@ -265,20 +324,111 @@
         setTimeout(() => { btn.textContent = original; }, 1500);
     }
 
+    function copyBasketSnapshot(btn) {
+        const snapshot = buildBasketSnapshot();
+        const text = JSON.stringify(snapshot, null, 2);
+        GM_setValue('lastBasketSnapshot', text);
+        if (typeof GM_setClipboard === 'function') {
+            GM_setClipboard(text, 'text');
+        } else {
+            navigator.clipboard.writeText(text);
+        }
+
+        const missingTpnb = snapshot.items.filter((item) => !item.tpnb).length;
+        const original = btn.textContent;
+        btn.textContent = missingTpnb ? `Backed up (${missingTpnb} unmatched)` : 'Basket backed up';
+        setTimeout(() => { btn.textContent = original; }, 2500);
+    }
+
+    async function saveBasketToList(btn) {
+        const snapshot = buildBasketSnapshot();
+        const listItems = snapshot.items
+            .filter((item) => item.tpnb)
+            .map((item) => ({ tpnb: item.tpnb, quantity: item.quantity }));
+        const missing = snapshot.items.filter((item) => !item.tpnb);
+
+        if (listItems.length === 0) {
+            window.alert('I could not match any basket items to Tesco product numbers. Use "Backup Basket JSON" as a fallback.');
+            return;
+        }
+        if (missing.length > 0) {
+            const ok = window.confirm(
+                `Matched ${listItems.length}/${snapshot.items.length} basket items.\n\n` +
+                `${missing.length} item(s) could not be matched to Tesco product numbers and will only be in the JSON backup.\n\n` +
+                'Continue saving the matched items to a list?'
+            );
+            if (!ok) return;
+        }
+
+        GM_setValue('lastBasketSnapshot', JSON.stringify(snapshot, null, 2));
+        btn.dataset.running = '1';
+        const original = btn.textContent;
+        btn.textContent = 'Choose a list...';
+
+        const choice = await pickListId();
+        if (choice.cancelled) {
+            btn.textContent = original;
+            btn.dataset.running = '0';
+            return;
+        }
+        if (choice.error) {
+            btn.textContent = choice.error.message === 'NO_AUTH' ? 'No token entered' : 'Failed to load lists';
+            setTimeout(() => {
+                btn.textContent = original;
+                btn.dataset.running = '0';
+            }, 3000);
+            return;
+        }
+
+        btn.textContent = `Saving ${listItems.length}...`;
+        try {
+            await addItemsToList(listItems, choice.listId);
+            btn.textContent = `Saved ${listItems.length} to list`;
+        } catch (e) {
+            btn.textContent = 'Failed, see console';
+            console.error('Tesco Toolkit: save basket to list failed', e);
+        }
+
+        setTimeout(() => {
+            btn.textContent = original;
+            btn.dataset.running = '0';
+        }, 3500);
+    }
+
     function initBasketCopy() {
         const existing = document.getElementById('basket-copy-btn');
-        const onTrolleyPage = /\/(shop|groceries)\/en-GB\/trolley/.test(location.pathname);
-        const hasBasketItems = !!document.querySelector('li[data-testid="product-list-item"]');
+        const backupExisting = document.getElementById('basket-backup-btn');
+        const saveExisting = document.getElementById('basket-save-list-btn');
+        const onTrolleyPage = isTrolleyPage();
+        const hasBasketItems = getBasketDomItems().length > 0;
 
         if (!onTrolleyPage || !hasBasketItems) {
             if (existing) existing.remove();
+            if (backupExisting) backupExisting.remove();
+            if (saveExisting) saveExisting.remove();
             return;
         }
-        if (existing) return;
 
-        const btn = makeFloatingButton('basket-copy-btn', 'Copy Basket List', 20);
-        btn.addEventListener('click', () => copyBasket(btn));
-        document.body.appendChild(btn);
+        if (!existing) {
+            const btn = makeFloatingButton('basket-copy-btn', 'Copy Basket List', 20);
+            btn.addEventListener('click', () => copyBasket(btn));
+            document.body.appendChild(btn);
+        }
+
+        if (!backupExisting) {
+            const btn = makeFloatingButton('basket-backup-btn', 'Backup Basket JSON', 70);
+            btn.addEventListener('click', () => copyBasketSnapshot(btn));
+            document.body.appendChild(btn);
+        }
+
+        if (!saveExisting) {
+            const btn = makeFloatingButton('basket-save-list-btn', 'Save Basket To List', 120);
+            btn.addEventListener('click', () => {
+                if (btn.dataset.running === '1') return;
+                saveBasketToList(btn);
+            });
+            document.body.appendChild(btn);
+        }
     }
 
     // ---------- Bulk Save to List by clicking (favourites / last order page) ----------
@@ -405,12 +555,13 @@
     function initApiAddToList() {
         const existing = document.getElementById('api-add-to-list-btn');
         const onProductPage = /\/(shop|groceries)\/en-GB\/products\//.test(location.pathname);
+        const onTrolleyPage = isTrolleyPage();
         const products = extractPageProducts();
 
         // Individual product pages already have their own native "Save to list"
         // link (Tesco appears to be rolling this out inconsistently across
         // products), so this button would just be redundant clutter there.
-        if (onProductPage || products.length === 0) {
+        if (onProductPage || onTrolleyPage || products.length === 0) {
             if (existing) existing.remove();
             return;
         }
